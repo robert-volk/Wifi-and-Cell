@@ -3,18 +3,23 @@
 Shows connection type, signal, and download/upload speed on one screen, with a Wi-Fi / Cellular selector.
 The speed test is pinned to the selected interface, so you can test cellular while Wi-Fi is on.
 
-## What iOS does and doesn't expose
+## What it does
 
-- Band number (B13, n77), dBm, and negotiated link rate are not available to normal apps.
-- The pill shows the cellular generation (5G, 5G NSA, LTE, 3G) or the Wi-Fi network name.
-- Signal: real Wi-Fi strength (0-100%) only if the app has the Wi-Fi Info entitlement and Location permission.
-  Otherwise it's a quality rating estimated from the last speed test (speed and latency).
-- Speeds: measured against speed.cloudflare.com, 8 seconds per direction (up to about 80 MB down, 40 MB up).
+Live monitor, no manual tests. While the app is open it:
+- polls Wi-Fi strength every second (Wi-Fi needs the Wi-Fi Info entitlement and Location permission),
+- runs short repeating test bursts on the selected link for link down/up and latency,
+- charts live traffic from the interface byte counters.
+Pause/Play (top right) stops everything. It also pauses when the app is backgrounded.
 
-### Enabling real Wi-Fi strength (optional)
-Add `Resources/LinkMeter.entitlements` with `com.apple.developer.networking.wifi-info` = true,
-and `CODE_SIGN_ENTITLEMENTS: Resources/LinkMeter.entitlements` to the target settings. Needs a paid developer account
-and may make AltServer sideloading fail if the capability isn't provisioned.
+## What iOS doesn't expose
+
+- Band (2.4/5/6 GHz): not readable. Set it yourself from the Band menu. Without it, a hint appears if speeds exceed 200 Mbps.
+- dBm: iOS gives a 0-1 strength. dBm shown is a rough scaling (about -100 to -40). Without the entitlement, signal is a quality estimate.
+- Router link rate: not available. "Link" speed is measured to speed.cloudflare.com.
+- Cellular band and dBm: not available.
+
+The workflow ad-hoc signs the app with `Resources/LinkMeter.entitlements` so AltServer can request the Wi-Fi capability.
+If AltServer install fails, delete the "Ad-hoc sign" step in the workflow.
 
 ## Build
 

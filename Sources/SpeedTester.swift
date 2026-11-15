@@ -74,22 +74,10 @@ final class Conn {
 enum SpeedTester {
     static let host = "speed.cloudflare.com"
 
-    static func run(on iface: NWInterface.InterfaceType,
-                    phase: @escaping (String) -> Void,
-                    live: @escaping (Double) -> Void) async throws -> SpeedResult {
-        phase("Latency")
-        let lat = try await latency(iface)
-        phase("Download")
-        let down = try await download(iface, progress: live)
-        phase("Upload")
-        let up = try await upload(iface, progress: live)
-        return SpeedResult(down: down, up: up, latencyMs: lat)
-    }
-
-    /// Best of three time-to-first-byte readings on fresh connections.
-    static func latency(_ iface: NWInterface.InterfaceType) async throws -> Double {
+    /// Best of N time-to-first-byte readings on fresh connections.
+    static func latency(_ iface: NWInterface.InterfaceType, samples: Int = 3) async throws -> Double {
         var best = Double.greatestFiniteMagnitude
-        for _ in 0..<3 {
+        for _ in 0..<samples {
             let c = Conn(host: host, iface: iface)
             try await c.start()
             let req = "GET /__down?bytes=0 HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
@@ -103,12 +91,13 @@ enum SpeedTester {
     }
 
     static func download(_ iface: NWInterface.InterfaceType,
+                         bytes: Int = 80_000_000,
                          seconds: Double = 8,
                          progress: @escaping (Double) -> Void) async throws -> Double {
         let c = Conn(host: host, iface: iface)
         try await c.start()
         defer { c.cancel() }
-        let req = "GET /__down?bytes=80000000 HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
+        let req = "GET /__down?bytes=\(bytes) HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
         try await c.send(Data(req.utf8))
 
         var total = 0
@@ -137,12 +126,13 @@ enum SpeedTester {
     }
 
     static func upload(_ iface: NWInterface.InterfaceType,
+                       bytes: Int = 40_000_000,
                        seconds: Double = 8,
                        progress: @escaping (Double) -> Void) async throws -> Double {
         let c = Conn(host: host, iface: iface)
         try await c.start()
         defer { c.cancel() }
-        let body = 40_000_000
+        let body = bytes
         let header = "POST /__up HTTP/1.1\r\nHost: \(host)\r\nContent-Type: application/octet-stream\r\nContent-Length: \(body)\r\nConnection: close\r\n\r\n"
         try await c.send(Data(header.utf8))
 

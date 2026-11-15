@@ -41,6 +41,30 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             clean build
 
+      - name: Embed app icons into the built app
+        run: |
+          set -euo pipefail
+          APP_PATH="build/Build/Products/Release-iphoneos/LinkMeter.app"
+          PLIST="$APP_PATH/Info.plist"
+          cp Resources/AppIcons/*.png "$APP_PATH/"
+          PB=/usr/libexec/PlistBuddy
+          "$PB" -c "Delete :CFBundleIcons" "$PLIST" || true
+          "$PB" -c "Add :CFBundleIcons dict" "$PLIST"
+          "$PB" -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$PLIST"
+          "$PB" -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$PLIST"
+          i=0
+          for n in AppIcon20x20 AppIcon29x29 AppIcon40x40 AppIcon60x60; do
+            "$PB" -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:$i string $n" "$PLIST"
+            i=$((i+1))
+          done
+          "$PB" -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName string AppIcon" "$PLIST"
+
+      - name: Ad-hoc sign with Wi-Fi entitlement (so AltServer sees it)
+        run: |
+          APP_PATH="build/Build/Products/Release-iphoneos/LinkMeter.app"
+          codesign --force --sign - --entitlements Resources/LinkMeter.entitlements "$APP_PATH"
+          codesign -d --entitlements - "$APP_PATH" || true
+
       - name: Package unsigned IPA
         run: |
           APP_PATH="build/Build/Products/Release-iphoneos/LinkMeter.app"
