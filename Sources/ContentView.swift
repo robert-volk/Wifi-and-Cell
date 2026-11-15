@@ -14,7 +14,7 @@ struct ContentView: View {
                 Text("LinkMeter").font(.title2.weight(.semibold))
                 Spacer()
                 HStack(spacing: 6) {
-                    Circle().fill(m.monitoring && m.connected ? teal : Color.gray).frame(width: 8, height: 8)
+                    Circle().fill(m.monitoring && m.wifiConnected ? teal : Color.gray).frame(width: 8, height: 8)
                     Text(m.monitoring ? "Live" : "Paused").font(.footnote).foregroundStyle(.secondary)
                 }
                 Button { m.setMonitoring(!m.monitoring) } label: {
@@ -25,27 +25,19 @@ struct ContentView: View {
                 .tint(.white)
             }
 
-            Picker("Connection", selection: $m.selected) {
-                ForEach(LinkKind.allCases) { Text($0.rawValue).tag($0) }
-            }
-            .pickerStyle(.segmented)
-
-            connectionCard
-
-            HStack(spacing: 12) {
-                tile("Link down", value: m.result?.down, unit: "Mbps", icon: "arrow.down")
-                tile("Link up", value: m.result?.up, unit: "Mbps", icon: "arrow.up")
-            }
-
-            trafficCard
+            bandCard
+            speedCard
 
             Spacer(minLength: 0)
 
+            if !m.wifiConnected {
+                Text("Connect to Wi-Fi to measure the link.").font(.footnote).foregroundStyle(.secondary)
+            }
             if let e = m.errorText {
                 Text(e).font(.footnote).foregroundStyle(.red).multilineTextAlignment(.center)
             }
 
-            Text("Link speed comes from short, repeating test bursts, about 80 MB a minute on Wi-Fi and 15 MB on cellular. iOS doesn't share the band, true dBm, or router link rate with apps.")
+            Text("Link speed is measured with short repeating test bursts, about 80 MB a minute. iOS doesn't share the band or the router's negotiated rate with apps, so choose the band yourself.")
                 .font(.caption2).foregroundStyle(.secondary).multilineTextAlignment(.center)
         }
         .padding(16)
@@ -56,121 +48,56 @@ struct ContentView: View {
         }
     }
 
-    // MARK: Cards
-
-    private var connectionCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(m.selected.rawValue).font(.subheadline).foregroundStyle(.secondary)
-                Spacer()
-                Text(m.connected ? m.pillText : "Not connected")
-                    .font(.caption.weight(.medium))
-                    .padding(.horizontal, 10).padding(.vertical, 4)
-                    .background(m.connected ? teal.opacity(0.25) : Color.gray.opacity(0.25))
-                    .foregroundStyle(m.connected ? teal : .secondary)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-            }
-            HStack(alignment: .firstTextBaseline) {
-                Text(m.bigSignalText).font(.system(size: 44, weight: .semibold)).minimumScaleFactor(0.6)
-                Spacer()
-                signalBars
-            }
-            Text(m.signalCaption).font(.footnote).foregroundStyle(.secondary)
-
-            if m.selected == .wifi {
-                Divider().overlay(Color.white.opacity(0.1))
+    private var bandCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Band").font(.subheadline).foregroundStyle(.secondary)
+            Menu {
+                ForEach(WifiBand.allCases) { b in
+                    Button(b.rawValue) { m.band = b }
+                }
+            } label: {
                 HStack {
-                    Text("Band").font(.subheadline).foregroundStyle(.secondary)
+                    Text(m.band == .unset ? "Set band" : m.band.rawValue)
+                        .font(.system(size: 44, weight: .semibold))
+                    Image(systemName: "chevron.up.chevron.down").font(.body)
                     Spacer()
-                    Menu {
-                        ForEach(WifiBand.allCases) { b in
-                            Button(b.rawValue) { m.band = b }
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Text(m.band == .unset ? "Set band" : m.band.rawValue).font(.headline)
-                            Image(systemName: "chevron.up.chevron.down").font(.caption)
-                        }
-                        .foregroundStyle(teal)
-                    }
                 }
-                if let hint = m.bandHint {
-                    Text(hint).font(.footnote).foregroundStyle(.secondary)
-                } else if m.band != .unset {
-                    Text("Set by you. iOS can't read the band.").font(.footnote).foregroundStyle(.secondary)
-                }
+                .foregroundStyle(m.band == .unset ? Color.secondary : teal)
+            }
+            if let hint = m.bandHint {
+                Text(hint).font(.footnote).foregroundStyle(.secondary)
+            } else {
+                Text(m.band == .unset ? "Tap to choose" : "Set by you").font(.footnote).foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .background(panel)
         .clipShape(RoundedRectangle(cornerRadius: 14))
     }
 
-    private var trafficCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Label("Live traffic", systemImage: "waveform.path.ecg").font(.footnote).foregroundStyle(.secondary)
-                Spacer()
-                Text("↓ \(fmt(m.liveRx))  ↑ \(fmt(m.liveTx)) Mbps").font(.footnote.monospacedDigit())
-            }
-            Sparkline(values: m.history).stroke(teal, lineWidth: 2).frame(height: 54)
-            HStack {
-                Label("Latency", systemImage: "timer").font(.footnote).foregroundStyle(.secondary)
-                Spacer()
-                Text(m.result.map { String(format: "%.0f ms", $0.latencyMs) } ?? "—")
-                    .font(.footnote.monospacedDigit())
-            }
-        }
-        .padding(14)
-        .background(panel)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-    }
-
-    private var signalBars: some View {
-        HStack(alignment: .bottom, spacing: 4) {
-            ForEach(1...4, id: \.self) { i in
-                RoundedRectangle(cornerRadius: 2)
-                    .fill(i <= m.bars ? barColor : Color.gray.opacity(0.3))
-                    .frame(width: 8, height: CGFloat(8 + i * 8))
-            }
-        }
-    }
-
-    private var barColor: Color {
-        switch m.bars { case 1: return .red; case 2: return .orange; default: return teal }
-    }
-
-    private func fmt(_ v: Double) -> String { v >= 100 ? String(format: "%.0f", v) : String(format: "%.1f", v) }
-
-    private func tile(_ title: String, value: Double?, unit: String, icon: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(title, systemImage: icon).font(.footnote).foregroundStyle(.secondary)
-            HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(value.map(fmt) ?? "—").font(.system(size: 28, weight: .semibold))
-                Text(unit).font(.footnote).foregroundStyle(.secondary)
+    private var speedCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Link speed").font(.subheadline).foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 12) {
+                speed("Down", m.result?.down, "arrow.down")
+                speed("Up", m.result?.up, "arrow.up")
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
+        .padding(16)
         .background(panel)
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: 14))
     }
-}
 
-struct Sparkline: Shape {
-    var values: [Double]
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        guard values.count > 1 else {
-            p.move(to: CGPoint(x: 0, y: rect.maxY)); p.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-            return p
+    private func speed(_ title: String, _ v: Double?, _ icon: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(title, systemImage: icon).font(.footnote).foregroundStyle(.secondary)
+            Text(v.map(fmt) ?? "—").font(.system(size: 44, weight: .semibold)).minimumScaleFactor(0.6)
+            Text("Mbps").font(.footnote).foregroundStyle(.secondary)
         }
-        let top = max(values.max() ?? 1, 1)
-        for (i, v) in values.enumerated() {
-            let x = rect.width * CGFloat(i) / CGFloat(values.count - 1)
-            let y = rect.maxY - rect.height * CGFloat(v / top)
-            if i == 0 { p.move(to: CGPoint(x: x, y: y)) } else { p.addLine(to: CGPoint(x: x, y: y)) }
-        }
-        return p
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private func fmt(_ v: Double) -> String { v >= 100 ? String(format: "%.0f", v) : String(format: "%.1f", v) }
 }
