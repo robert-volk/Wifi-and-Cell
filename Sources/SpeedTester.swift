@@ -13,41 +13,65 @@ enum SpeedError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .noRoute: return "No route on that connection. Check it's on, and that Cellular Data is allowed for this app."
+        case .noRoute: return "Couldn't reach the server over Wi-Fi."
         case .failed(let s): return s
         }
     }
 }
 
+/// Where a test talks to: the internet (Cloudflare, TLS) or your PC on the LAN (plain HTTP).
+struct Target {
+    var host: String
+    var port: UInt16
+    var tls: Bool
+    var downPath: String      // "%d" is replaced with the byte count
+    var upPath: String
+    var pingPath: String
+
+    static let internet = Target(host: "speed.cloudflare.com", port: 443, tls: true,
+                                 downPath: "/__down?bytes=%d", upPath: "/__up", pingPath: "/__down?bytes=0")
+
+    static func lan(_ host: String) -> Target {
+        Target(host: host, port: 8765, tls: false,
+               downPath: "/down?bytes=%d", upPath: "/up", pingPath: "/ping")
+    }
+
+    var isLAN: Bool { !tls }
+}
+
 /// Thin async wrapper over NWConnection pinned to one interface type.
-/// Pinning is what lets the Wi-Fi / Cellular selector test a specific link.
 final class Conn {
     private let c: NWConnection
+    private let q = DispatchQueue(label: "linkmeter.conn")
 
-    init(host: String, iface: NWInterface.InterfaceType) {
-        let params = NWParameters(tls: NWProtocolTLS.Options(), tcp: NWProtocolTCP.Options())
+    init(target: Target, iface: NWInterface.InterfaceType) {
+        let params: NWParameters = target.tls
+            ? NWParameters(tls: NWProtocolTLS.Options(), tcp: NWProtocolTCP.Options())
+            : NWParameters.tcp
         params.requiredInterfaceType = iface
-        c = NWConnection(host: NWEndpoint.Host(host), port: 443, using: params)
+        c = NWConnection(host: NWEndpoint.Host(target.host),
+                         port: NWEndpoint.Port(rawValue: target.port)!, using: params)
     }
 
     func start() async throws {
         try await withCheckedThrowingContinuation { (k: CheckedContinuation<Void, Error>) in
             var finished = false
-            c.stateUpdateHandler = { state in
+            func finish(_ error: Error?) {
                 if finished { return }
+                finished = true
+                if let error = error { c.cancel(); k.resume(throwing: error) } else { k.resume() }
+            }
+            c.stateUpdateHandler = { state in
                 switch state {
-                case .ready:
-                    finished = true; k.resume()
-                case .waiting:
-                    finished = true; k.resume(throwing: SpeedError.noRoute)
-                case .failed(let e):
-                    finished = true; k.resume(throwing: SpeedError.failed(e.localizedDescription))
-                case .cancelled:
-                    finished = true; k.resume(throwing: CancellationError())
+                case .ready: finish(nil)
+                case .waiting: finish(SpeedError.noRoute)
+                case .failed(let e): finish(SpeedError.failed(e.localizedDescription))
+                case .cancelled: finish(CancellationError())
                 default: break
                 }
             }
-            c.start(queue: DispatchQueue(label: "linkmeter.conn"))
+            c.start(queue: q)
+            q.asyncAfter(deadline: .now() + 4) { finish(SpeedError.noRoute) }
         }
     }
 
@@ -72,15 +96,15 @@ final class Conn {
 }
 
 enum SpeedTester {
-    static let host = "speed.cloudflare.com"
+    static let iface: NWInterface.InterfaceType = .wifi
 
-    /// Best of N time-to-first-byte readings on fresh connections.
-    static func latency(_ iface: NWInterface.InterfaceType, samples: Int = 3) async throws -> Double {
+    /// Time to first byte of a tiny request on a fresh connection.
+    static func latency(_ t: Target, samples: Int = 1) async throws -> Double {
         var best = Double.greatestFiniteMagnitude
         for _ in 0..<samples {
-            let c = Conn(host: host, iface: iface)
+            let c = Conn(target: t, iface: iface)
             try await c.start()
-            let req = "GET /__down?bytes=0 HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
+            let req = "GET \(t.pingPath) HTTP/1.1\r\nHost: \(t.host)\r\nConnection: close\r\n\r\n"
             let t0 = Date()
             try await c.send(Data(req.utf8))
             _ = try await c.receive()
@@ -90,14 +114,12 @@ enum SpeedTester {
         return best
     }
 
-    static func download(_ iface: NWInterface.InterfaceType,
-                         bytes: Int = 80_000_000,
-                         seconds: Double = 8,
-                         progress: @escaping (Double) -> Void) async throws -> Double {
-        let c = Conn(host: host, iface: iface)
+    static func download(_ t: Target, bytes: Int, seconds: Double) async throws -> Double {
+        let c = Conn(target: t, iface: iface)
         try await c.start()
         defer { c.cancel() }
-        let req = "GET /__down?bytes=\(bytes) HTTP/1.1\r\nHost: \(host)\r\nConnection: close\r\n\r\n"
+        let path = t.downPath.replacingOccurrences(of: "%d", with: String(bytes))
+        let req = "GET \(path) HTTP/1.1\r\nHost: \(t.host)\r\nConnection: close\r\n\r\n"
         try await c.send(Data(req.utf8))
 
         var total = 0
@@ -118,36 +140,64 @@ enum SpeedTester {
             }
             total += data?.count ?? 0
             elapsed = Date().timeIntervalSince(t0!)
-            if elapsed > 0.3 { progress(Double(total) * 8 / elapsed / 1_000_000) }
             if done || elapsed >= seconds { break loop }
         }
         guard total > 0, elapsed > 0 else { throw SpeedError.failed("Download test returned no data.") }
         return Double(total) * 8 / elapsed / 1_000_000
     }
 
-    static func upload(_ iface: NWInterface.InterfaceType,
-                       bytes: Int = 40_000_000,
-                       seconds: Double = 8,
-                       progress: @escaping (Double) -> Void) async throws -> Double {
-        let c = Conn(host: host, iface: iface)
+    static func upload(_ t: Target, bytes: Int, seconds: Double) async throws -> Double {
+        let c = Conn(target: t, iface: iface)
         try await c.start()
         defer { c.cancel() }
-        let body = bytes
-        let header = "POST /__up HTTP/1.1\r\nHost: \(host)\r\nContent-Type: application/octet-stream\r\nContent-Length: \(body)\r\nConnection: close\r\n\r\n"
+        let header = "POST \(t.upPath) HTTP/1.1\r\nHost: \(t.host)\r\nContent-Type: application/octet-stream\r\nContent-Length: \(bytes)\r\nConnection: close\r\n\r\n"
         try await c.send(Data(header.utf8))
 
         let chunk = Data(count: 262_144)
         var sent = 0
         let t0 = Date()
         var elapsed = 0.0
-        while sent < body {
+        while sent < bytes {
             try await c.send(chunk)
             sent += chunk.count
             elapsed = Date().timeIntervalSince(t0)
-            if elapsed > 0.3 { progress(Double(sent) * 8 / elapsed / 1_000_000) }
             if elapsed >= seconds { break }
         }
         guard elapsed > 0 else { throw SpeedError.failed("Upload test didn't run.") }
         return Double(sent) * 8 / elapsed / 1_000_000
+    }
+
+    /// Round-trip time to the router. A TCP connection to port 80 either opens or is refused;
+    /// both mean the router answered, so both give a valid time. Returns nil if there's no reply.
+    static func routerLatency(host: String) async -> Double? {
+        let params = NWParameters.tcp
+        params.requiredInterfaceType = iface
+        let c = NWConnection(host: NWEndpoint.Host(host), port: 80, using: params)
+        let q = DispatchQueue(label: "linkmeter.router")
+        return await withCheckedContinuation { (k: CheckedContinuation<Double?, Never>) in
+            var done = false
+            let t0 = Date()
+            func finish(_ v: Double?) {
+                if done { return }
+                done = true
+                c.cancel()
+                k.resume(returning: v)
+            }
+            c.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    finish(Date().timeIntervalSince(t0) * 1000)
+                case .waiting(let e), .failed(let e):
+                    if case .posix(let code) = e, code == .ECONNREFUSED {
+                        finish(Date().timeIntervalSince(t0) * 1000)
+                    } else {
+                        finish(nil)
+                    }
+                default: break
+                }
+            }
+            c.start(queue: q)
+            q.asyncAfter(deadline: .now() + 1.5) { finish(nil) }
+        }
     }
 }
